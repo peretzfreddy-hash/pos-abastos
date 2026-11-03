@@ -1,139 +1,78 @@
-import { error, json } from '@sveltejs/kit';
-import { GoogleGenAI } from '@google/genai';
+// src/routes/api/procesar-orden/+server.ts
+import { json } from '@sveltejs/kit';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { GEMINI_API_KEY } from '$env/static/private';
 
-const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
-
-// 🧠 1. CACHÉ INTELIGENTE EN MEMORIA (Aprende de cada orden exitosa)
-const cacheMemoria = new Map<string, any>();
-
-// 🛡️ 2. Motor local inteligente de alta precisión (Respaldo por si falla la red)
-function interpretarLocalmente(texto: string, inventario: any[]) {
-    const t = texto.toLowerCase();
-    
-    if (t.includes('cobrar') || t.includes('pagar') || t.includes('total') || t.includes('facturar')) {
-        return { items: [], accion: 'cobrar' };
-    }
-    if (t.includes('limpiar') || t.includes('cancelar') || t.includes('borrar') || t.includes('vaciar')) {
-        return { items: [], accion: 'limpiar' };
-    }
-
-    const itemsEncontrados: any[] = [];
-    let cantidadExtraida = 1;
-    const matchNumero = t.match(/(\d+([.,]\d+)?)/);
-    
-    if (matchNumero) {
-        cantidadExtraida = parseFloat(matchNumero[0].replace(',', '.'));
-    } else if (t.includes('medio') || t.includes('media')) {
-        cantidadExtraida = 0.5;
-    } else if (t.includes('dos')) {
-        cantidadExtraida = 2;
-    } else if (t.includes('tres')) {
-        cantidadExtraida = 3;
-    } else if (t.includes('cuatro')) {
-        cantidadExtraida = 4;
-    }
-
-    for (const prod of inventario) {
-        const terminos = [prod.nombre.toLowerCase(), ...(prod.sinonimos || [])];
-        const coincide = terminos.some(termino => t.includes(termino));
-
-        if (coincide) {
-            if (!itemsEncontrados.some(i => i.id === prod.id)) {
-                itemsEncontrados.push({ id: prod.id, cantidad: cantidadExtraida });
-            }
-        }
-    }
-
-    return { items: itemsEncontrados, accion: 'ninguna' };
-}
-
-// 🔄 3. Función de reintento automático para Gemini
-async function generarConReintento(prompt: string, maxIntentos = 3) {
-    for (let intento = 1; intento <= maxIntentos; intento++) {
-        try {
-            const response = await ai.models.generateContent({
-                model: 'gemini-3.8-flash',
-                contents: prompt,
-            });
-            return { response, desdeLocal: false };
-        } catch (err: any) {
-            console.warn(`Intento ${intento} con Gemini fallido:`, err.status || err.message);
-            
-            if ((err.status === 503 || err.message?.includes('503') || err.message?.includes('demand')) && intento < maxIntentos) {
-                const tiempoEspera = Math.pow(2, intento) * 1000;
-                await new Promise(resolve => setTimeout(resolve, tiempoEspera));
-                continue;
-            }
-            
-            if (intento === maxIntentos) {
-                return { response: null, desdeLocal: true };
-            }
-        }
-    }
-    return { response: null, desdeLocal: true };
-}
-
-export async function POST({ request }: { request: Request }) {
+export async function POST({ request }) {
     try {
         const { texto, inventario } = await request.json();
 
-        if (!texto) {
-            throw error(400, 'No se proporcionó texto de voz.');
+        // Si no hay API Key configurada, saltamos directo al motor local de respaldo
+        if (!GEMINI_API_KEY) {
+            console.warn("⚠️ GEMINI_API_KEY no encontrada. Usando motor local de respaldo.");
+            return json(procesarLocalmente(texto, inventario));
         }
 
-        // Normalizamos la frase para que la caché sea ultra precisa (minúsculas y sin espacios de sobra)
-        const textoNormalizado = texto.toLowerCase().trim();
+        const genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+        const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
 
-        // ⚡ PASO A: ¿La orden ya está en la caché local? ¡Devuélvela al instante sin gastar tokens!
-        if (cacheMemoria.has(textoNormalizado)) {
-            console.log(`⚡ [CACHÉ HIT]: Sirviendo "${textoNormalizado}" desde memoria local.`);
-            return json(cacheMemoria.get(textoNormalizado));
-        }
-
-        let resultadoJson;
         const prompt = `
-Eres el asistente estricto de un punto de venta (POS) en un abasto venezolano. 
-Tu única tarea es analizar la orden de voz del cajero y devolver un JSON puro.
+Analiza la orden de voz dictada en una bodega en Venezuela.
+Devuelve ÚNICAMENTE un JSON válido (sin formato Markdown, sin \`\`\`json) con esta estructura exacta:
 
-Inventario disponible (JSON):
+1. Si dice "cobrar", "procesar venta", "listo":
+   { "accion": "cobrar" }
+
+2. Si pide fiar (ej. "fiar a Don Julio", "guardar fiao a María"):
+   { "accion": "fiar", "cliente": "Nombre Extraído" }
+
+3. Si dice "limpiar", "cancelar", "borrar":
+   { "accion": "limpiar" }
+
+4. Si menciona productos del inventario:
+   { "accion": "agregar", "items": [{ "id": "ID_PRODUCTO", "cantidad": NUMERO }] }
+
+Inventario disponible:
 ${JSON.stringify(inventario)}
 
-Orden del cajero: "${texto}"
+Texto recibido: "${texto}"
+`;
 
-Instrucciones obligatorias:
-1. Si la orden contiene productos del inventario, devuélvelos con sus IDs y cantidades exactas.
-2. Si la orden dice "cobrar", "pagar" o "facturar", pon "accion": "cobrar".
-3. Si la orden dice "limpiar", "cancelar" o "borrar", pon "accion": "limpiar".
-4. SI LA ORDEN ES UN SALUDO O NO TIENE RELACIÓN, DEBE SER: {"items": [], "accion": "ninguna"}
+        const result = await model.generateContent(prompt);
+        const responseText = result.response.text().replace(/```json|```/g, '').trim();
+        const data = JSON.parse(responseText);
 
-Responde ÚNICAMENTE con el objeto JSON válido, sin bloques markdown ni texto adicional.
-        `;
-
-        const { response, desdeLocal } = await generarConReintento(prompt);
-
-        if (desdeLocal || !response) {
-            console.warn('⚠️ API saturada. Usando motor local inteligente...');
-            resultadoJson = interpretarLocalmente(texto, inventario);
-        } else {
-            let respuestaTexto = response.text?.trim() || '{}';
-            respuestaTexto = respuestaTexto.replace(/```json/g, '').replace(/```/g, '').trim();
-            
-            try {
-                resultadoJson = JSON.parse(respuestaTexto);
-            } catch (e) {
-                resultadoJson = interpretarLocalmente(texto, inventario);
-            }
-        }
-
-        // 🧠 PASO B: Guardar (aprender) el resultado en la caché para la próxima vez
-        cacheMemoria.set(textoNormalizado, resultadoJson);
-        console.log(`🧠 [APRENDIZAJE]: Orden "${textoNormalizado}" guardada en caché local.`);
-
-        return json(resultadoJson);
-
-    } catch (err: any) {
-        console.error('❌ ERROR EN EL SERVIDOR:', err);
-        return json({ items: [], accion: 'ninguna' });
+        return json(data);
+    } catch (error) {
+        console.error('⚠️ Error en Gemini, activando respaldo local:', error);
+        const { texto, inventario } = await request.json();
+        return json(procesarLocalmente(texto, inventario));
     }
+}
+
+// 🛡️ Motor de respaldo local por si falla la red o la API key
+function procesarLocalmente(texto: string, inventario: any[]) {
+    const textoLower = texto.toLowerCase();
+
+    if (textoLower.includes('cobrar') || textoLower.includes('procesar')) {
+        return { accion: 'cobrar' };
+    }
+    if (textoLower.includes('limpiar') || textoLower.includes('cancelar')) {
+        return { accion: 'limpiar' };
+    }
+    if (textoLower.includes('fiar a') || textoLower.includes('fiao a')) {
+        const cliente = textoLower.split(/fiar a|fiao a/)[1]?.trim() || 'Cliente';
+        return { accion: 'fiar', cliente: cliente.charAt(0).toUpperCase() + cliente.slice(1) };
+    }
+
+    // Buscar coincidencias sencillas en el inventario
+    const itemsEncontrados: { id: string; cantidad: number }[] = [];
+    inventario.forEach(prod => {
+        const nombreProd = prod.nombre.toLowerCase();
+        if (textoLower.includes(nombreProd) || prod.sinonimos?.some((s: string) => textoLower.includes(s))) {
+            itemsEncontrados.push({ id: prod.id, cantidad: 1 });
+        }
+    });
+
+    return { items: itemsEncontrados };
 }
