@@ -1,14 +1,11 @@
 <script lang="ts">
     import { onMount } from 'svelte';
-    import CargarInventarioModal from '../lib/CargarInventarioModal.svelte';
 
     interface Producto {
         id: string;
+        codigoBarras: string;
         nombre: string;
-        precioUsd: number;
-        exentoIva: boolean;
-        unidad: string;
-        categoria: string;
+        precioUSD: number;
         sinonimos?: string[];
     }
 
@@ -17,320 +14,386 @@
         cantidad: number;
     }
 
-    // Estado reactivo con Svelte 5 ($state)
-    let inventarioAbasto = $state<Producto[]>([
-        { id: '1', nombre: 'Harina P.A.N. 1kg', precioUsd: 1.20, exentoIva: true, unidad: 'und', categoria: 'Granos', sinonimos: ['harina', 'harina pan', 'pan'] },
-        { id: '2', nombre: 'Queso Blanco Semi-Duro', precioUsd: 5.50, exentoIva: false, unidad: 'kg', categoria: 'Lácteos', sinonimos: ['queso', 'queso blanco'] },
-        { id: '3', nombre: 'Café Molido 250g', precioUsd: 3.80, exentoIva: false, unidad: 'und', categoria: 'Bebidas', sinonimos: ['cafe', 'cafecito'] },
-        { id: '4', nombre: 'Refresco 1.5L', precioUsd: 2.00, exentoIva: false, unidad: 'und', categoria: 'Bebidas', sinonimos: ['refresco', 'cola', 'soda'] },
-        { id: '5', nombre: 'Aceite de Maíz 1L', precioUsd: 3.50, exentoIva: false, unidad: 'und', categoria: 'Viveres', sinonimos: ['aceite'] },
-        { id: '6', nombre: 'Arroz Blanco 1kg', precioUsd: 1.30, exentoIva: true, unidad: 'und', categoria: 'Granos', sinonimos: ['arroz'] },
-        { id: '7', nombre: 'Azúcar Refinada 1kg', precioUsd: 1.40, exentoIva: true, unidad: 'und', categoria: 'Viveres', sinonimos: ['azucar'] },
-        { id: '8', nombre: 'Malta 350ml', precioUsd: 0.80, exentoIva: false, unidad: 'und', categoria: 'Bebidas', sinonimos: ['malta', 'maltica'] }
-    ]);
+    interface Fiado {
+        id: string;
+        cliente: string;
+        telefono: string;
+        items: ItemCarrito[];
+        totalUSD: number;
+        fecha: string;
+        tasaAplicada: number;
+    }
 
-    let carrito = $state<ItemCarrito[]>([]);
-    let tasaBcv = $state<number>(36.5);
-    let aplicarIgtf = $state<boolean>(false);
-    let modalAbierto = $state<boolean>(false);
+    // Inventario base
+    let inventario: Producto[] = [
+        { id: '1', codigoBarras: '7591012345678', nombre: 'Harina P.A.N. 1kg', precioUSD: 1.20, sinonimos: ['harina', 'harina pan'] },
+        { id: '2', codigoBarras: '7592012345678', nombre: 'Queso Blanco Semi-Duro', precioUSD: 5.50, sinonimos: ['queso', 'queso blanco'] },
+        { id: '3', codigoBarras: '7593012345678', nombre: 'Café Molido 250g', precioUSD: 3.80, sinonimos: ['cafe', 'cafecito'] },
+        { id: '4', codigoBarras: '7594012345678', nombre: 'Refresco 1.5L', precioUSD: 2.00, sinonimos: ['refresco', 'cola'] },
+        { id: '5', codigoBarras: '7595012345678', nombre: 'Aceite de Maíz 1L', precioUSD: 3.50, sinonimos: ['aceite'] }
+    ];
 
-    let escuchando = $state(false);
-    let ultimaOrden = $state("Haz clic en el micrófono o presiona un producto del catálogo...");
-    let recognition: any = null;
+    let carrito: ItemCarrito[] = [];
+    let tasaBCV = 36.50;
+    let tasaEuro = 39.80;
+    let ultimaSincronizacion = '';
+    let codigoInput = '';
+    let ultimaOrden = 'Toca el micrófono o escanea un producto...';
+    let escuchando = false;
 
-    onMount(() => {
-        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-        if (SpeechRecognition) {
-            recognition = new SpeechRecognition();
-            recognition.lang = 'es-VE';
-            recognition.continuous = false;
-            recognition.interimResults = false;
+    // Navegación de Pestañas ('pos' o 'fiados')
+    let pestañaActiva: 'pos' | 'fiados' = 'pos';
 
-            recognition.onstart = () => { 
-                escuchando = true; 
-                ultimaOrden = "Escuchando... Di algo ahora mismo.";
-            };
-
-            recognition.onresult = (event: any) => {
-                const texto = event.results[0][0].transcript.toLowerCase();
-                ultimaOrden = `"${texto}"`;
-                interpretarComandoLocal(texto);
-            };
-
-            recognition.onerror = (event: any) => {
-                console.error("Error de voz:", event.error);
-                ultimaOrden = `⚠️ Error de voz: ${event.error}`;
-                escuchando = false;
-            };
-
-            recognition.onend = () => { 
-                escuchando = false; 
-            };
+    // Lista de Cuentas Fiadas (Idealmente se guardaría en Base de Datos, aquí en memoria reactiva)
+    let listaFiados: Fiado[] = [
+        {
+            id: 'f1',
+            cliente: 'Don Julio (Vecino)',
+            telefono: '0414-6123456',
+            items: [{ producto: inventario[0], cantidad: 2 }],
+            totalUSD: 2.40,
+            fecha: new Date().toLocaleDateString(),
+            tasaAplicada: 36.50
         }
-    });
+    ];
 
-    function alternarEscucha() {
-        if (!recognition) {
-            alert("Tu navegador no soporta reconocimiento de voz. Usa Google Chrome.");
-            return;
-        }
-        if (escuchando) {
-            recognition.stop();
-        } else {
-            try {
-                recognition.start();
-            } catch (e) {
-                console.error(e);
-            }
+    let nombreClienteFiado = '';
+    let telefonoClienteFiado = '';
+
+    // Totales reactivos del carrito actual
+    $: subtotalUSD = carrito.reduce((acc, item) => acc + (item.producto.precioUSD * item.cantidad), 0);
+    $: totalBCV = subtotalUSD * tasaBCV;
+    $: totalEuro = subtotalUSD * tasaEuro;
+
+    async function cargarTasas() {
+        try {
+            const res = await fetch('/api/tasas');
+            const data = await res.json();
+            tasaBCV = data.bcv;
+            tasaEuro = data.euro;
+            ultimaSincronizacion = data.ultimaActualizacion;
+        } catch (e) {
+            console.error("No se pudieron cargar las tasas automáticas");
         }
     }
 
-    // Función inteligente que se conecta al endpoint de Gemini
-    async function interpretarComandoLocal(texto: string) {
-        ultimaOrden = `Procesando con IA: "${texto}"...`;
+    onMount(() => {
+        cargarTasas();
+        const interval = setInterval(cargarTasas, 30 * 60 * 1000);
+        return () => clearInterval(interval);
+    });
 
+    function manejarCodigoBarras() {
+        const codigoLimpio = codigoInput.trim();
+        if (!codigoLimpio) return;
+
+        const encontrado = inventario.find(p => p.codigoBarras === codigoLimpio);
+        if (encontrado) {
+            agregarAlCarrito(encontrado, 1);
+            ultimaOrden = `Escaneado: ${encontrado.nombre}`;
+        } else {
+            ultimaOrden = `⚠️ Código no registrado: ${codigoLimpio}`;
+        }
+        codigoInput = '';
+    }
+
+    function agregarAlCarrito(producto: Producto, cantidad: number) {
+        const index = carrito.findIndex(item => item.producto.id === producto.id);
+        if (index > -1) {
+            carrito[index].cantidad += cantidad;
+            carrito = [...carrito];
+        } else {
+            carrito = [...carrito, { producto, cantidad }];
+        }
+    }
+
+    function limpiarTicket() {
+        carrito = [];
+        ultimaOrden = 'Ticket limpiado.';
+    }
+
+    function procesarVenta() {
+        if (carrito.length === 0) return alert('El ticket está vacío.');
+        alert(`¡Venta contado procesada!\nTotal: $${subtotalUSD.toFixed(2)} USD / Bs. ${totalBCV.toFixed(2)}`);
+        carrito = [];
+        ultimaOrden = 'Venta de contado registrada.';
+    }
+
+    // 📒 Registrar la compra actual como "Fiado"
+    function enviarAFiados() {
+        if (carrito.length === 0) return alert('El ticket está vacío.');
+        if (!nombreClienteFiado.trim()) return alert('Por favor, indica el nombre del cliente para el fiao.');
+
+        const nuevoFiado: Fiado = {
+            id: Date.now().toString(),
+            cliente: nombreClienteFiado.trim(),
+            telefono: telefonoClienteFiado.trim() || 'Sin teléfono',
+            items: [...carrito],
+            totalUSD: subtotalUSD,
+            fecha: new Date().toLocaleDateString(),
+            tasaAplicada: tasaBCV
+        };
+
+        listaFiados = [nuevoFiado, ...listaFiados];
+        alert(`✅ Compra fiada registrada exitosamente a nombre de: ${nuevoFiado.cliente}`);
+        
+        // Limpiar
+        carrito = [];
+        nombreClienteFiado = '';
+        telefonoClienteFiado = '';
+        pestañaActiva = 'fiados'; // Te lleva directo a la pestaña de fiados para ver el registro
+    }
+
+    // 💰 Saldar / Pagar un fiado
+    function saldarFiado(id: string) {
+        const fiado = listaFiados.find(f => f.id === id);
+        if (!fiado) return;
+
+        const totalEnBs = fiado.totalUSD * fiado.tasaAplicada;
+        const confirmar = confirm(`¿Confirmar pago de la cuenta de ${fiado.cliente}?\nTotal a cobrar: $${fiado.totalUSD.toFixed(2)} (Bs. ${totalEnBs.toFixed(2)})`);
+        
+        if (confirmar) {
+            listaFiados = listaFiados.filter(f => f.id !== id);
+            alert(`🎉 Cuenta de ${fiado.cliente} saldada y cerrada con éxito.`);
+        }
+    }
+
+    // Reconocimiento de voz
+    function iniciarEscuchaVoz() {
+        const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+        if (!SpeechRecognition) return alert('Tu navegador no soporta voz. Usa Google Chrome.');
+
+        const recognition = new SpeechRecognition();
+        recognition.lang = 'es-VE';
+
+        recognition.onstart = () => { escuchando = true; ultimaOrden = 'Escuchando orden...'; };
+        recognition.onresult = async (event: any) => {
+            const texto = event.results[0][0].transcript;
+            ultimaOrden = `Procesando: "${texto}"...`;
+            await enviarOrdenAlServidor(texto);
+        };
+        recognition.onerror = () => { escuchando = false; ultimaOrden = 'Error en micrófono.'; };
+        recognition.onend = () => { escuchando = false; };
+        recognition.start();
+    }
+
+    async function enviarOrdenAlServidor(texto: string) {
         try {
             const res = await fetch('/api/procesar-orden', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ texto, inventario: inventarioAbasto })
+                body: JSON.stringify({ texto, inventario })
             });
-
             const data = await res.json();
 
-            if (data.error) {
-                alert(data.error);
-                return;
+            if (data.accion === 'cobrar') procesarVenta();
+            else if (data.accion === 'limpiar') limpiarTicket();
+            else if (data.items?.length > 0) {
+                data.items.forEach((i: { id: string; cantidad: number }) => {
+                    const prod = inventario.find(p => p.id === i.id);
+                    if (prod) agregarAlCarrito(prod, i.cantidad);
+                });
+                ultimaOrden = 'Orden de voz aplicada.';
             }
-
-            if (data.accion === 'cobrar') {
-                procesarCobro();
-                return;
-            }
-            if (data.accion === 'limpiar') {
-                carrito = [];
-                ultimaOrden = 'Ticket limpiado por voz.';
-                return;
-            }
-
-            if (data.items && data.items.length > 0) {
-                for (const itemAi of data.items) {
-                    const productoReal = inventarioAbasto.find(p => p.id === itemAi.id);
-                    if (productoReal) {
-                        agregarAlCarrito(productoReal, itemAi.cantidad);
-                    }
-                }
-                ultimaOrden = `"${texto}" (Procesado con éxito por Gemini)`;
-            } else {
-                ultimaOrden = `La IA no identificó productos en: "${texto}"`;
-            }
-
         } catch (e) {
-            console.error(e);
-            ultimaOrden = `Error de conexión con la IA.`;
+            ultimaOrden = 'Error de comunicación.';
         }
-    }
-
-    function agregarAlCarrito(producto: Producto, cantidad: number = 1) {
-        const index = carrito.findIndex(item => item.producto.id === producto.id);
-        if (index > -1) {
-            carrito[index].cantidad += cantidad;
-        } else {
-            carrito.push({ producto, cantidad });
-        }
-    }
-
-    function cambiarCantidad(id: string, delta: number) {
-        const index = carrito.findIndex(item => item.producto.id === id);
-        if (index > -1) {
-            carrito[index].cantidad += delta;
-            if (carrito[index].cantidad <= 0) {
-                carrito.splice(index, 1);
-            }
-        }
-    }
-
-    function actualizarInventario(nuevoInventario: Producto[]) {
-        inventarioAbasto = nuevoInventario;
-        ultimaOrden = `Inventario actualizado: ${nuevoInventario.length} productos cargados.`;
-    }
-
-    // Cálculos fiscales venezolanos
-    let subtotalUsd = $derived(carrito.reduce((acc, item) => acc + (item.producto.precioUsd * item.cantidad), 0));
-    
-    let baseImponibleUsd = $derived(carrito.reduce((acc, item) => {
-        return item.producto.exentoIva ? acc : acc + (item.producto.precioUsd * item.cantidad);
-    }, 0));
-
-    let ivaUsd = $derived(baseImponibleUsd * 0.16);
-    let igtfUsd = $derived(aplicarIgtf ? (subtotalUsd + ivaUsd) * 0.03 : 0);
-
-    let totalUsd = $derived(subtotalUsd + ivaUsd + igtfUsd);
-    let totalBs = $derived(totalUsd * tasaBcv);
-
-    function procesarCobro() {
-        if (carrito.length === 0) {
-            alert("El ticket está vacío.");
-            return;
-        }
-        alert(`¡Venta procesada con éxito!\nTotal a pagar: $${totalUsd.toFixed(2)} (Bs. ${totalBs.toFixed(2)})`);
-        carrito = [];
     }
 </script>
 
-<main class="min-h-screen bg-slate-950 text-slate-100 p-4 font-sans flex flex-col gap-4">
-    <!-- Header -->
-    <header class="flex justify-between items-center bg-slate-900 border border-slate-800 p-4 rounded-2xl shadow-md">
+<div class="p-6 bg-gray-900 text-white min-h-screen font-sans">
+    <!-- Barra Superior -->
+    <header class="flex flex-col md:flex-row justify-between items-center mb-6 bg-gray-800 p-4 rounded-xl shadow gap-4">
         <div>
-            <div class="flex items-center gap-2">
-                <span class="bg-blue-600 text-white font-bold px-2 py-0.5 rounded text-sm">Abasto</span>
-                <h1 class="text-xl font-black tracking-wide text-white">Voice <span class="text-xs bg-slate-800 text-blue-400 px-2 py-0.5 rounded-full border border-slate-700">POS v1.1</span></h1>
-            </div>
-            <p class="text-xs text-slate-400 mt-0.5">Automatización de ventas y control fiscal (SENIAT / BCV)</p>
+            <h1 class="text-xl font-bold flex items-center gap-2">
+                Abasto Voice <span class="text-xs bg-blue-600 px-2 py-1 rounded">POS + Fiados</span>
+            </h1>
+            <p class="text-xs text-gray-400">Actualizado BCV: {ultimaSincronizacion || 'Sincronizando...'}</p>
         </div>
 
-        <div class="flex items-center gap-4">
-            <button onclick={() => modalAbierto = true} class="bg-slate-800 hover:bg-slate-700 text-blue-400 font-semibold text-xs px-3 py-2 rounded-xl border border-slate-700 flex items-center gap-1.5 transition shadow-sm">
-                📊 Cargar Excel
+        <!-- Selector de Pestañas -->
+        <div class="flex bg-gray-900 p-1 rounded-lg border border-gray-700">
+            <button 
+                on:click={() => pestañaActiva = 'pos'} 
+                class="px-4 py-1.5 rounded-md text-sm font-medium transition {pestañaActiva === 'pos' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}"
+            >
+                🛒 Punto de Venta
             </button>
-
-            <div class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800">
-                <span class="text-xs text-slate-400 font-medium">Tasa BCV ($):</span>
-                <input type="number" step="0.1" bind:value={tasaBcv} class="bg-transparent text-blue-400 font-bold w-16 text-right focus:outline-none" />
+            <button 
+                on:click={() => pestañaActiva = 'fiados'} 
+                class="px-4 py-1.5 rounded-md text-sm font-medium transition relative {pestañaActiva === 'fiados' ? 'bg-yellow-600 text-white' : 'text-gray-400 hover:text-white'}"
+            >
+                📒 Cuaderno de Fiados
+                {#if listaFiados.length > 0}
+                    <span class="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] w-5 h-5 flex items-center justify-center rounded-full font-bold">
+                        {listaFiados.length}
+                    </span>
+                {/if}
+            </button>
+        </div>
+        
+        <!-- Tasas -->
+        <div class="flex gap-3 items-center">
+            <div class="bg-gray-700 px-3 py-1.5 rounded-lg text-xs">
+                BCV: <span class="text-green-400 font-bold">Bs. {tasaBCV}</span>
             </div>
-
-            <label class="flex items-center gap-2 bg-slate-950 px-3 py-1.5 rounded-xl border border-slate-800 cursor-pointer select-none">
-                <input type="checkbox" bind:checked={aplicarIgtf} class="rounded bg-slate-900 border-slate-700 text-blue-600 focus:ring-0" />
-                <span class="text-xs text-slate-300 font-medium">Aplicar IGTF (3%)</span>
-            </label>
+            <div class="bg-gray-700 px-3 py-1.5 rounded-lg text-xs">
+                Ref (€): <span class="text-yellow-400 font-bold">Bs. {tasaEuro}</span>
+            </div>
         </div>
     </header>
 
-    <!-- Layout Principal -->
-    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
-        
-        <!-- Panel Izquierdo: Voz y Catálogo -->
-        <div class="lg:col-span-2 flex flex-col gap-4">
-            
-            <!-- Sección de Voz -->
-            <section class="bg-slate-900 border border-slate-800 p-6 rounded-2xl flex flex-col items-center justify-center text-center shadow-lg relative overflow-hidden">
-                <div class="absolute inset-0 bg-blue-600/5 pointer-events-none"></div>
-                
-                <button 
-                    onclick={alternarEscucha} 
-                    class="w-24 h-24 rounded-full flex items-center justify-center transition-all shadow-xl relative {escuchando ? 'bg-red-600 animate-pulse shadow-red-900/50' : 'bg-blue-600 hover:bg-blue-500 shadow-blue-900/50'}"
-                >
-                    <svg class="w-10 h-10 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z"></path>
-                    </svg>
-                </button>
-
-                <h2 class="text-lg font-bold mt-4 text-white">
-                    {escuchando ? 'Escuchando orden... Habla claro' : 'Toca el micrófono para dictar'}
-                </h2>
-                <p class="text-xs text-slate-400 mt-1">Ej: "Dos harinas pan", "Medio kilo de queso", "Cobrar"</p>
-
-                <div class="w-full bg-slate-950 border border-slate-800 rounded-xl p-3 mt-4 text-left">
-                    <span class="text-[10px] font-bold text-slate-500 uppercase tracking-wider block">Última orden procesada:</span>
-                    <p class="text-sm text-blue-300 font-medium truncate">{ultimaOrden}</p>
-                </div>
-            </section>
-
-            <!-- Catálogo Táctil Rápido -->
-            <section class="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex flex-col gap-3 shadow-md flex-1">
-                <div class="flex justify-between items-center">
-                    <h3 class="text-sm font-bold text-slate-300 uppercase tracking-wider">Catálogo Rápido (Táctil)</h3>
-                    <span class="text-xs text-slate-500">{inventarioAbasto.length} productos disponibles</span>
-                </div>
-
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-2.5 overflow-y-auto max-h-[320px] pr-1">
-                    {#each inventarioAbasto as producto}
-                        <button 
-                            onclick={() => agregarAlCarrito(producto, 1)}
-                            class="bg-slate-950 hover:bg-slate-800/80 border border-slate-800 hover:border-blue-500/50 p-3 rounded-xl text-left transition flex flex-col justify-between group shadow-sm"
-                        >
-                            <span class="text-xs font-semibold text-slate-200 group-hover:text-blue-400 line-clamp-2">{producto.nombre}</span>
-                            <div class="flex justify-between items-end mt-2">
-                                <span class="text-sm font-bold text-emerald-400">${producto.precioUsd.toFixed(2)}</span>
-                                <span class="text-[10px] bg-slate-900 text-slate-400 px-1.5 py-0.5 rounded border border-slate-800">{producto.unidad}</span>
-                            </div>
-                        </button>
-                    {/each}
-                </div>
-            </section>
-
+    {#if pestañaActiva === 'pos'}
+        <!-- 🛒 VISTA PUNTO DE VENTA -->
+        <div class="mb-6">
+            <input 
+                type="text" 
+                bind:value={codigoInput} 
+                on:keydown={(e) => e.key === 'Enter' && manejarCodigoBarras()}
+                placeholder="🔫 Escanea con la pistola láser o escribe el código de barras..." 
+                class="w-full bg-gray-800 border border-gray-700 p-3 rounded-xl text-sm text-gray-300 focus:outline-none focus:border-blue-500 shadow-inner"
+                autofocus
+            />
         </div>
 
-        <!-- Panel Derecho: Ticket de Venta -->
-        <section class="bg-slate-900 border border-slate-800 p-4 rounded-2xl flex flex-col justify-between shadow-lg">
-            <div>
-                <div class="flex justify-between items-center border-b border-slate-800 pb-3 mb-3">
-                    <h3 class="text-sm font-bold uppercase tracking-wider text-white">Ticket de Venta</h3>
-                    <span class="text-xs bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700">{carrito.reduce((acc, i) => acc + i.cantidad, 0)} ítems</span>
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <!-- Voz -->
+            <div class="lg:col-span-2 bg-gray-800 p-6 rounded-xl flex flex-col items-center justify-center min-h-[300px] shadow">
+                <div class="w-full bg-gray-900/50 p-4 rounded-lg mb-6 border border-gray-700/50">
+                    <p class="text-xs text-gray-400 uppercase tracking-wider mb-1">Estado:</p>
+                    <p class="text-sm font-medium text-blue-300">{ultimaOrden}</p>
                 </div>
 
-                <!-- Lista del Carrito -->
-                <div class="overflow-y-auto max-h-[260px] flex flex-col gap-2 pr-1">
+                <button 
+                    on:click={iniciarEscuchaVoz}
+                    class="relative bg-blue-600 hover:bg-blue-500 p-8 rounded-full shadow-2xl transition transform active:scale-95 flex items-center justify-center {escuchando ? 'animate-pulse bg-red-600' : ''}"
+                >
+                    <span class="text-3xl">🎤</span>
+                </button>
+                <p class="mt-4 text-sm text-gray-400">Toca para dictar ("dos harinas pan", "medio queso")</p>
+            </div>
+
+            <!-- Ticket y Fiao -->
+            <div class="bg-gray-800 p-6 rounded-xl flex flex-col justify-between shadow">
+                <div>
+                    <h2 class="text-lg font-semibold mb-4 border-b border-gray-700 pb-2 flex justify-between items-center">
+                        <span>Ticket Actual</span>
+                        <span class="text-xs bg-gray-700 px-2 py-0.5 rounded-full">{carrito.length} ítems</span>
+                    </h2>
+
                     {#if carrito.length === 0}
-                        <div class="text-center py-16 text-slate-500">
-                            <svg class="w-12 h-12 mx-auto mb-2 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
-                            <p class="text-xs">El ticket está vacío. Agrega productos por voz o tocando el catálogo.</p>
+                        <div class="py-8 text-center text-gray-500 text-sm">
+                            <p>El ticket está vacío.</p>
                         </div>
                     {:else}
-                        {#each carrito as item}
-                            <div class="bg-slate-950 border border-slate-800 p-2.5 rounded-xl flex justify-between items-center">
-                                <div class="flex-1 pr-2">
-                                    <h4 class="text-xs font-semibold text-slate-200">{item.producto.nombre}</h4>
-                                    <span class="text-[10px] text-emerald-400 font-bold">${item.producto.precioUsd.toFixed(2)} c/u</span>
-                                </div>
-                                <div class="flex items-center gap-2">
-                                    <button onclick={() => cambiarCantidad(item.producto.id, -1)} class="w-6 h-6 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-300 font-bold text-xs flex items-center justify-center">-</button>
-                                    <span class="text-xs font-bold text-white w-4 text-center">{item.cantidad}</span>
-                                    <button onclick={() => cambiarCantidad(item.producto.id, 1)} class="w-6 h-6 bg-slate-900 hover:bg-slate-800 border border-slate-700 rounded text-slate-300 font-bold text-xs flex items-center justify-center">+</button>
-                                </div>
-                            </div>
-                        {/each}
+                        <ul class="space-y-2 mb-4 max-h-48 overflow-y-auto pr-1">
+                            {#each carrito as item}
+                                <li class="flex justify-between items-center text-xs bg-gray-900/40 p-2 rounded-lg border border-gray-700/40">
+                                    <span>{item.cantidad}x {item.producto.nombre}</span>
+                                    <span class="font-mono font-semibold">${(item.producto.precioUSD * item.cantidad).toFixed(2)}</span>
+                                </li>
+                            {/each}
+                        </ul>
                     {/if}
                 </div>
-            </div>
 
-            <!-- Resumen Fiscal y Botones -->
-            <div class="border-t border-slate-800 pt-3 mt-3 flex flex-col gap-2">
-                <div class="flex justify-between text-xs text-slate-400">
-                    <span>Subtotal:</span>
-                    <span>${subtotalUsd.toFixed(2)}</span>
-                </div>
-                <div class="flex justify-between text-xs text-slate-400">
-                    <span>IVA (16% Base Imponible):</span>
-                    <span>${ivaUsd.toFixed(2)}</span>
-                </div>
-                {#if aplicarIgtf}
-                    <div class="flex justify-between text-xs text-amber-400">
-                        <span>IGTF (3%):</span>
-                        <span>${igtfUsd.toFixed(2)}</span>
+                <!-- Totales y Opciones de Cierre / Fiao -->
+                <div class="border-t border-gray-700 pt-4 space-y-3">
+                    <div class="flex justify-between text-sm text-gray-400">
+                        <span>Subtotal USD:</span>
+                        <span>${subtotalUSD.toFixed(2)}</span>
                     </div>
-                {/if}
-                <div class="flex justify-between items-baseline pt-2 border-t border-slate-800/60">
-                    <span class="text-sm font-bold text-white">Total USD:</span>
-                    <span class="text-lg font-black text-emerald-400">${totalUsd.toFixed(2)}</span>
-                </div>
-                <div class="flex justify-between items-baseline bg-slate-950 px-3 py-2 rounded-xl border border-slate-800">
-                    <span class="text-xs font-semibold text-slate-300">Total Bolívares (BCV):</span>
-                    <span class="text-sm font-bold text-blue-400">Bs. {totalBs.toFixed(2)}</span>
-                </div>
+                    <div class="flex justify-between font-bold text-green-400 text-base">
+                        <span>Total BCV:</span>
+                        <span>Bs. {totalBCV.toFixed(2)}</span>
+                    </div>
 
-                <div class="grid grid-cols-2 gap-2 mt-2">
-                    <button onclick={() => carrito = []} class="bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold text-xs py-3 rounded-xl border border-slate-700 transition">
-                        Limpiar Ticket
-                    </button>
-                    <button onclick={procesarCobro} class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs py-3 rounded-xl transition shadow-lg shadow-emerald-900/40">
-                        Procesar Venta
-                    </button>
+                    <!-- Inputs para Fiado -->
+                    <div class="bg-gray-900/60 p-3 rounded-lg border border-gray-700 space-y-2">
+                        <p class="text-xs font-semibold text-yellow-400">📝 ¿Enviar al Cuaderno de Fiados?</p>
+                        <input type="text" placeholder="Nombre del cliente" bind:value={nombreClienteFiado} class="w-full bg-gray-800 text-xs p-2 rounded border border-gray-700 text-white" />
+                        <input type="text" placeholder="Teléfono (opcional)" bind:value={telefonoClienteFiado} class="w-full bg-gray-800 text-xs p-2 rounded border border-gray-700 text-white" />
+                        <button on:click={enviarAFiados} class="w-full bg-yellow-600 hover:bg-yellow-500 py-1.5 rounded text-xs font-bold transition text-black">
+                            Guardar como Fiao
+                        </button>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-2">
+                        <button on:click={limpiarTicket} class="bg-gray-700 hover:bg-gray-600 py-2 rounded text-xs font-semibold">
+                            Limpiar
+                        </button>
+                        <button on:click={procesarVenta} class="bg-green-600 hover:bg-green-500 py-2 rounded text-xs font-bold">
+                            Cobrar Contado
+                        </button>
+                    </div>
                 </div>
             </div>
-        </section>
+        </div>
 
-    </div>
-</main>
+    {:else}
+        <!-- 📒 VISTA CUADERNO DE FIADOS -->
+        <div class="bg-gray-800 p-6 rounded-xl shadow">
+            <div class="flex justify-between items-center mb-6 border-b border-gray-700 pb-4">
+                <div>
+                    <h2 class="text-xl font-bold text-yellow-400">Cuaderno de Fiados (Cuentas por Cobrar)</h2>
+                    <p class="text-xs text-gray-400">Control de créditos abiertos en el abasto a la tasa del día de la compra.</p>
+                </div>
+                <div class="bg-gray-700 px-4 py-2 rounded-lg text-sm font-semibold">
+                    Total Fiado Global: <span class="text-yellow-400 font-mono">${listaFiados.reduce((acc, f) => acc + f.totalUSD, 0).toFixed(2)} USD</span>
+                </div>
+            </div>
 
-<CargarInventarioModal bind:abierto={modalAbierto} {actualizarInventario} />
+            {#if listaFiados.length === 0}
+                <div class="py-16 text-center text-gray-500">
+                    <p class="text-lg">No hay cuentas fiadas pendientes. ¡Todo al día!</p>
+                </div>
+            {:else}
+                <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {#each listaFiados as fiado}
+                        <div class="bg-gray-900 border border-gray-700 rounded-xl p-4 flex flex-col justify-between shadow-lg">
+                            <div>
+                                <div class="flex justify-between items-start mb-2">
+                                    <div>
+                                        <h3 class="font-bold text-base text-white">{fiado.cliente}</h3>
+                                        <p class="text-xs text-gray-400">📞 {fiado.telefono} • 📅 {fiado.fecha}</p>
+                                    </div>
+                                    <span class="text-[10px] bg-yellow-500/20 text-yellow-300 px-2 py-0.5 rounded-full border border-yellow-500/30">Deuda Abierta</span>
+                                </div>
+
+                                <div class="my-3 bg-gray-800/60 p-2.5 rounded-lg border border-gray-700/50 max-h-32 overflow-y-auto">
+                                    <p class="text-[11px] text-gray-400 mb-1 font-semibold">Detalle de productos:</p>
+                                    <ul class="space-y-1">
+                                        {#each fiado.items as item}
+                                            <li class="text-xs flex justify-between">
+                                                <span>{item.cantidad}x {item.producto.nombre}</span>
+                                                <span class="font-mono">${(item.producto.precioUSD * item.cantidad).toFixed(2)}</span>
+                                            </li>
+                                        {/each}
+                                    </ul>
+                                </div>
+                            </div>
+
+                            <div class="border-t border-gray-800 pt-3 mt-2">
+                                <div class="flex justify-between items-center mb-1 text-xs">
+                                    <span class="text-gray-400">Total USD:</span>
+                                    <span class="font-bold font-mono text-white">${fiado.totalUSD.toFixed(2)}</span>
+                                </div>
+                                <div class="flex justify-between items-center mb-3 text-xs">
+                                    <span class="text-gray-400">Equivalente BCV ({fiado.tasaAplicada}):</span>
+                                    <span class="font-bold font-mono text-green-400">Bs. {(fiado.totalUSD * fiado.tasaAplicada).toFixed(2)}</span>
+                                </div>
+
+                                <button 
+                                    on:click={() => saldarFiado(fiado.id)}
+                                    class="w-full bg-green-600 hover:bg-green-500 text-white font-bold py-2 rounded-lg text-xs transition shadow"
+                                >
+                                    Saldar / Pagar Cuenta 💵
+                                </button>
+                            </div>
+                        </div>
+                    {/each}
+                </div>
+            {/if}
+        </div>
+    {/if}
+</div>

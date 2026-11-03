@@ -1,11 +1,13 @@
 import { error, json } from '@sveltejs/kit';
 import { GoogleGenAI } from '@google/genai';
-import { GEMINI_API_KEY } from '$env/static/private'; // 🔒 Carga estática segura desde .env
+import { GEMINI_API_KEY } from '$env/static/private';
 
-// Inicializamos el cliente con la variable de entorno estática
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
-// 🧠 Motor local inteligente de alta precisión (Respaldo automático)
+// 🧠 1. CACHÉ INTELIGENTE EN MEMORIA (Aprende de cada orden exitosa)
+const cacheMemoria = new Map<string, any>();
+
+// 🛡️ 2. Motor local inteligente de alta precisión (Respaldo por si falla la red)
 function interpretarLocalmente(texto: string, inventario: any[]) {
     const t = texto.toLowerCase();
     
@@ -46,7 +48,7 @@ function interpretarLocalmente(texto: string, inventario: any[]) {
     return { items: itemsEncontrados, accion: 'ninguna' };
 }
 
-// 🔄 Función de reintento automático para Gemini
+// 🔄 3. Función de reintento automático para Gemini
 async function generarConReintento(prompt: string, maxIntentos = 3) {
     for (let intento = 1; intento <= maxIntentos; intento++) {
         try {
@@ -58,7 +60,6 @@ async function generarConReintento(prompt: string, maxIntentos = 3) {
         } catch (err: any) {
             console.warn(`Intento ${intento} con Gemini fallido:`, err.status || err.message);
             
-            // Si es error 503 o alta demanda, esperamos y reintentamos
             if ((err.status === 503 || err.message?.includes('503') || err.message?.includes('demand')) && intento < maxIntentos) {
                 const tiempoEspera = Math.pow(2, intento) * 1000;
                 await new Promise(resolve => setTimeout(resolve, tiempoEspera));
@@ -79,6 +80,15 @@ export async function POST({ request }: { request: Request }) {
 
         if (!texto) {
             throw error(400, 'No se proporcionó texto de voz.');
+        }
+
+        // Normalizamos la frase para que la caché sea ultra precisa (minúsculas y sin espacios de sobra)
+        const textoNormalizado = texto.toLowerCase().trim();
+
+        // ⚡ PASO A: ¿La orden ya está en la caché local? ¡Devuélvela al instante sin gastar tokens!
+        if (cacheMemoria.has(textoNormalizado)) {
+            console.log(`⚡ [CACHÉ HIT]: Sirviendo "${textoNormalizado}" desde memoria local.`);
+            return json(cacheMemoria.get(textoNormalizado));
         }
 
         let resultadoJson;
@@ -102,9 +112,8 @@ Responde ÚNICAMENTE con el objeto JSON válido, sin bloques markdown ni texto a
 
         const { response, desdeLocal } = await generarConReintento(prompt);
 
-        // Si Gemini falla o está saturado (503), cae al motor local sin mostrar alertas
         if (desdeLocal || !response) {
-            console.warn('⚡ Respaldo local activado.');
+            console.warn('⚠️ API saturada. Usando motor local inteligente...');
             resultadoJson = interpretarLocalmente(texto, inventario);
         } else {
             let respuestaTexto = response.text?.trim() || '{}';
@@ -117,11 +126,14 @@ Responde ÚNICAMENTE con el objeto JSON válido, sin bloques markdown ni texto a
             }
         }
 
+        // 🧠 PASO B: Guardar (aprender) el resultado en la caché para la próxima vez
+        cacheMemoria.set(textoNormalizado, resultadoJson);
+        console.log(`🧠 [APRENDIZAJE]: Orden "${textoNormalizado}" guardada en caché local.`);
+
         return json(resultadoJson);
 
     } catch (err: any) {
         console.error('❌ ERROR EN EL SERVIDOR:', err);
-        // Respaldo de emergencia si algo falla catastróficamente
         return json({ items: [], accion: 'ninguna' });
     }
 }
